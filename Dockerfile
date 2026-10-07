@@ -25,7 +25,10 @@ ARG UID=1000
 ARG GID=1000
 RUN groupadd -g ${GID} dev 2>/dev/null || true && \
     useradd -m -u ${UID} -g ${GID} -s /bin/bash dev 2>/dev/null || true && \
-    mkdir -p /workspace && chown -R ${UID}:${GID} /workspace
+    mkdir -p /workspace && chown -R ${UID}:${GID} /workspace && \
+    # A project mounted from Windows is owned by another UID than the container
+    # user, and git refuses to touch it unless the directory is marked safe.
+    git config --system --add safe.directory /workspace
 
 # PYTHONPATH makes `from src... import ...` work from anywhere in the tree
 # without an install step.
