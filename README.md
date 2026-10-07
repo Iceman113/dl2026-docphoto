@@ -12,6 +12,36 @@ By the end of the lab this folder is your project repository, public on
 GitHub, with the lab solved and committed. The project description has the
 rules; the rest of this README has the infrastructure.
 
+## Results
+
+Validation: strict unit 4 (`split.seed: 3`), 380 photographs of tables and
+receipts, all scoreable. RMSE on the same rows for every model.
+
+| model                                                                | config             | val RMSE   |
+| -------------------------------------------------------------------- | ------------------ | ---------- |
+| constant (training mean)                                             | —                  | 0.2362     |
+| gradient boosting, 7 handcrafted features                            | —                  | **0.1732** |
+| MLP on 64×64 pixels, last epoch (60)                                 | `lab3_mlp.yaml`    | 0.2580     |
+| MLP, best epoch of the best variant, chosen on validation (peeking)  | lab 3 notebook     | 0.2255     |
+| MLP, early stopping on a stop set from the training groups (epoch 6) | `lab3_mlp_es.yaml` | 0.2372     |
+
+**Early stopping** Strict unit 6 (284 photographs, twocol) is
+taken out of the training side and used only to pick the epoch; the model
+trains on the remaining 1177 rows and the weights of the epoch with the lowest
+stop-set RMSE are restored. The validation rows play no part in the choice.
+Unit 6 because it is a whole strict unit, so none of its layouts leaks into
+the fit rows, and its family is still covered by unit 5; any other unit would
+remove a family from training. [W&B run](https://wandb.ai/potylasz-budapesti-m-szaki-s-gazdas-gtudom-nyi-egyetem/dl2026-docphoto/runs/9omgeqkk).
+
+It picks epoch 6 and scores 0.2372: better than training to the end (0.2580),
+but no better than the constant predictor (0.2362). The 0.2255 from class was
+the best of 4 × 60 validation scores, so part of it was selection on the
+validation set itself. The stop curve is noisy (its minimum at epoch 6 is
+barely below epochs 40–60) and does not track the validation curve, because a
+different unit of different documents is a different problem for a model that
+learns layouts. Early stopping limits the damage of memorisation; it does not
+give a 64 px network the information it lacks.
+
 ## Before the lab
 
 Do these at home. In class they cost the hour.
@@ -87,12 +117,12 @@ Server**, and enter `http://localhost:8888`.
 
 **If something goes wrong.**
 
-| symptom | fix |
-|---|---|
-| `port is already allocated` | another Jupyter is running: `docker compose down`, or stop the other one |
+| symptom                                | fix                                                                                   |
+| -------------------------------------- | ------------------------------------------------------------------------------------- |
+| `port is already allocated`            | another Jupyter is running: `docker compose down`, or stop the other one              |
 | the notebook does not see your W&B key | you edited `.env` after starting: `docker compose down`, then `docker compose up lab` |
-| `ModuleNotFoundError: src` | the notebook was opened from outside the container; use the browser at localhost:8888 |
-| a cell keeps running old code | save the file, then rerun the cell; if it persists, *Kernel → Restart* |
+| `ModuleNotFoundError: src`             | the notebook was opened from outside the container; use the browser at localhost:8888 |
+| a cell keeps running old code          | save the file, then rerun the cell; if it persists, _Kernel → Restart_                |
 
 Git runs on your host, not in the container: commit and push from a host
 terminal in this folder.
@@ -109,7 +139,7 @@ docker compose run --rm dev python -m src.train --config configs/cnn.yaml
 docker compose up lab                               # Jupyter Lab, localhost:8888
 ```
 
-There is deliberately no Makefile. The commands above *are* the interface, and
+There is deliberately no Makefile. The commands above _are_ the interface, and
 when something breaks you will be debugging Docker rather than a wrapper around
 it.
 
@@ -178,8 +208,8 @@ Then upload `submissions/cnn_best.csv` to the competition page.
 
 The file has exactly two columns, `image_id` and `usability`, one row per test
 image in the order of the competition's `sample_submission.csv`, every value a
-float in [0, 1]. `src/predict.py` builds the output *from the sample
-submission* rather than from a directory listing, so the ids and the row order
+float in [0, 1]. `src/predict.py` builds the output _from the sample
+submission_ rather than from a directory listing, so the ids and the row order
 cannot drift, and it asserts the row count, uniqueness, no NaNs and the value
 range before writing. Each of those has cost somebody a submission slot.
 
@@ -197,7 +227,7 @@ to W&B as an artifact of the run that made it and this question answers itself.
 
 1. **Write the split.** Before any model. See below.
 2. **Look at the data.** Plot the label distribution. Compare the best and
-   worst photos *at full resolution*: a thumbnail hides the difference between
+   worst photos _at full resolution_: a thumbnail hides the difference between
    a dark page and a blurred one.
 3. **Train a network.** Pretrained backbone, regression head. Get one run
    working end to end, with a checkpoint and a submission file, before you
@@ -220,12 +250,12 @@ optimistic.
 We measured it on this data with a ResNet-18 at 768 px, scoring the same model
 four ways:
 
-| validation scheme | RMSE |
-|---|---|
-| random 5-fold | 0.113 |
-| folds by `group` | 0.136 |
-| folds by `group_strict` | 0.143 |
-| the held-out test set | **0.148** |
+| validation scheme       | RMSE      |
+| ----------------------- | --------- |
+| random 5-fold           | 0.113     |
+| folds by `group`        | 0.136     |
+| folds by `group_strict` | 0.143     |
+| the held-out test set   | **0.148** |
 
 The random split is a fifth too good. `group`, in which no page and no
 photographer appears twice, is still 8 % too good: the two language versions

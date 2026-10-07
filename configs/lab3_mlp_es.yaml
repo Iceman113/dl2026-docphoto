@@ -1,0 +1,38 @@
+# Lab 3 homework 1: the in-class MLP with honest early stopping. Identical to
+# lab3_mlp.yaml except for name and train.early_stopping.
+name: lab3_mlp_es
+seed: 42
+
+data:
+  labels: data/raw/train.csv
+  images: data/raw/train
+  pixel_size: 64
+
+split:
+  strategy: by_group
+  group_column: group_strict
+  val_fraction: 0.2
+  seed: 3                       # holds out strict unit 4, as in class
+
+model:
+  type: mlp
+  hidden: [256, 64]
+  dropout: 0.3
+
+train:
+  epochs: 60
+  batch_size: 64
+  lr: 0.0003
+  weight_decay: 0.0001
+  log_every: 10
+  # The epoch is chosen on strict unit 6, taken out of the training side. A
+  # whole strict unit, so none of its layouts is in the remaining training
+  # rows, and unit 6 because its family (twocol) is still covered by unit 5:
+  # any other unit would remove a family from training entirely.
+  early_stopping:
+    group_column: group_strict
+    units: [6]
+
+wandb:
+  project: dl2026-docphoto
+  tags: [lab3, early-stopping]

@@ -101,6 +101,34 @@ def validate(model: torch.nn.Module, X_val: torch.Tensor, y_val: np.ndarray, ok:
 
 # ------------------------------------------------------------------ given
 
+class EarlyStopping:
+    """Remembers the weights of the epoch with the lowest RMSE on a stop set."""
+
+    def __init__(self, X: torch.Tensor, y: np.ndarray, ok: np.ndarray):
+        self.X, self.y, self.ok = X, y, ok
+        self.best, self.epoch, self.state = float("inf"), 0, None
+
+    def check(self, model: torch.nn.Module, epoch: int) -> float:
+        score = validate(model, self.X, self.y, self.ok)
+        if score < self.best:
+            self.best, self.epoch = score, epoch
+            self.state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        return score
+
+    def restore(self, model: torch.nn.Module) -> int:
+        model.load_state_dict(self.state)
+        return self.epoch
+
+
+def set_aside(df: pd.DataFrame, train_idx: np.ndarray, es: dict | None) -> tuple[np.ndarray, np.ndarray]:
+    """Split train_idx into (fit, stop) by whole units of es['group_column']; no stop rows without `es`."""
+    if not es:
+        return train_idx, np.array([], dtype=int)
+    in_stop = np.isin(df[es["group_column"]].to_numpy()[train_idx], es["units"])
+    assert 0 < in_stop.sum() < len(train_idx), "the early-stopping units must split the training rows"
+    return train_idx[~in_stop], train_idx[in_stop]
+
+
 def train_mlp(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndarray, val_idx: np.ndarray,
               device: str | None = None, tags: list[str] | None = None, log=print) -> dict:
     """Train on the pixel rows train_idx, validate on val_idx after every epoch, log everything.
@@ -108,10 +136,19 @@ def train_mlp(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndarray,
     `X` is the pixel table, one row per row of `df`. Returns the history, the
     validation predictions after the first and the last epoch, the trained
     model, the checkpoint path and the W&B run page.
+
+    Early stopping, when cfg['train']['early_stopping'] is set: the training
+    rows whose `group_column` value is in `units` are set aside as a stop set.
+    The model trains on the rest, and the weights of the epoch with the lowest
+    RMSE on the stop set are restored at the end. The validation rows never
+    take part in that choice, so the returned `val_rmse` is untouched.
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     set_seed(cfg["seed"])
     tr = cfg["train"]
+
+    es = tr.get("early_stopping")
+    train_idx, stop_idx = set_aside(df, train_idx, es)
 
     scaler = Standardiser().fit(X[train_idx])
     X_tr = to_tensor(scaler.transform(X[train_idx]), device)
@@ -126,34 +163,48 @@ def train_mlp(cfg: dict, X: np.ndarray, df: pd.DataFrame, train_idx: np.ndarray,
     loss_fn = torch.nn.MSELoss()           # the metric is RMSE; same minimiser
     generator = torch.Generator().manual_seed(cfg["seed"])
 
+    stopper = None
+    if es:
+        stopper = EarlyStopping(to_tensor(scaler.transform(X[stop_idx]), device),
+                                df[config.TARGET].to_numpy()[stop_idx], df["eval_ok"].to_numpy()[stop_idx] == 1)
+
     tracking.init_run(cfg, tags=tags)
     history, snapshots = [], {}
-    log(f"{cfg['name']}: {len(train_idx)} train / {len(val_idx)} val rows, {X.shape[1]} inputs, "
-        f"{sum(p.numel() for p in model.parameters()):,} parameters, {device}")
+    log(f"{cfg['name']}: {len(train_idx)} train / {len(stop_idx)} stop / {len(val_idx)} val rows, "
+        f"{X.shape[1]} inputs, {sum(p.numel() for p in model.parameters()):,} parameters, {device}")
     for epoch in range(1, tr["epochs"] + 1):
         t0 = time.time()
         loss = train_epoch(model, optimizer, loss_fn, X_tr, y_tr, tr["batch_size"], generator)
         val = validate(model, X_va, y_va, ok)
         train_eval = rmse(y_tr.cpu().numpy(), predict(model, X_tr))   # dropout off, as in validation
-        row = {"epoch": epoch, "train_loss": loss, "train_rmse": train_eval, "val_rmse": val,
-               "seconds": time.time() - t0}
-        history.append(row)
-        tracking.log_metrics({"train_loss": loss, "train_rmse": train_eval, "val_rmse": val}, step=epoch)
+        row = {"epoch": epoch, "train_loss": loss, "train_rmse": train_eval, "val_rmse": val}
+        if stopper:
+            row["stop_rmse"] = stopper.check(model, epoch)
+        tracking.log_metrics({k: v for k, v in row.items() if k != "epoch"}, step=epoch)
+        history.append(row | {"seconds": time.time() - t0})
         if epoch in (1, tr["epochs"]) or epoch % tr.get("log_every", 10) == 0:
-            log(f"epoch {epoch:3d}  train loss {loss:.4f}  train RMSE {train_eval:.4f}  val RMSE {val:.4f}")
+            stop = f"  stop RMSE {row['stop_rmse']:.4f}" if stopper else ""
+            log(f"epoch {epoch:3d}  train loss {loss:.4f}  train RMSE {train_eval:.4f}{stop}  val RMSE {val:.4f}")
         if epoch in (1, tr["epochs"]):
             snapshots[epoch] = predict(model, X_va)
 
+    kept_epoch = tr["epochs"]
+    if stopper:
+        kept_epoch = stopper.restore(model)
+        log(f"restored epoch {kept_epoch} (stop RMSE {stopper.best:.4f})")
+    val_pred = predict(model, X_va)
+    final_val = rmse(y_va[ok], val_pred[ok])
+
     ckpt = config.ROOT / "models" / f"{cfg['name']}.pt"
     ckpt.parent.mkdir(exist_ok=True)
-    torch.save({"state_dict": model.state_dict(), "config": cfg, "in_dim": X.shape[1],
+    torch.save({"state_dict": model.state_dict(), "config": cfg, "in_dim": X.shape[1], "epoch": kept_epoch,
                 "scaler_mean": scaler.mean, "scaler_scale": scaler.scale}, ckpt)
-    tracking.log_checkpoint(ckpt, cfg["name"], {"val_rmse": history[-1]["val_rmse"]})
-    tracking.log_metrics({"final_val_rmse": history[-1]["val_rmse"]})
+    tracking.log_checkpoint(ckpt, cfg["name"], {"val_rmse": final_val, "epoch": kept_epoch})
+    tracking.log_metrics({"final_val_rmse": final_val, "kept_epoch": kept_epoch})
     url = tracking.run_url()
     tracking.finish()
-    return {"history": pd.DataFrame(history), "val_pred": snapshots[tr["epochs"]], "snapshots": snapshots,
-            "model": model, "checkpoint": ckpt, "url": url, "val_index": val_idx, "ok": ok}
+    return {"history": pd.DataFrame(history), "val_pred": val_pred, "val_rmse": final_val, "kept_epoch": kept_epoch,
+            "snapshots": snapshots, "model": model, "checkpoint": ckpt, "url": url, "val_index": val_idx, "ok": ok}
 
 
 def main() -> None:
@@ -166,7 +217,7 @@ def main() -> None:
     X = pixel_table(df, cfg["data"]["pixel_size"])
     train_idx, val_idx = build_splits(df, cfg["split"]["group_column"], cfg["split"]["val_fraction"], cfg["split"]["seed"])
     result = train_mlp(cfg, X, df, train_idx, val_idx)
-    print(f"final val RMSE {result['history']['val_rmse'].iloc[-1]:.4f}  checkpoint {result['checkpoint']}  "
+    print(f"final val RMSE {result['val_rmse']:.4f} (epoch {result['kept_epoch']})  checkpoint {result['checkpoint']}  "
           f"run {result['url']}")
 
 
