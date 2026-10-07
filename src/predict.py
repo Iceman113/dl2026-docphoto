@@ -44,8 +44,25 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import torch
 import yaml
+
+from src.data.dataset import pixels_of_image
+from src.models.mlp import MLP
+
+
+class Predictor:
+    """The trained MLP together with the standardiser it was trained behind."""
+
+    def __init__(self, net: torch.nn.Module, mean: float, scale: float):
+        self.net, self.mean, self.scale = net, mean, scale
+
+    @torch.no_grad()
+    def __call__(self, pixels: np.ndarray) -> float:
+        x = torch.as_tensor((pixels - self.mean) / self.scale, dtype=torch.float32).unsqueeze(0)
+        return float(self.net(x)[0])
 
 
 def load_model(checkpoint: Path, cfg: dict):
@@ -54,7 +71,16 @@ def load_model(checkpoint: Path, cfg: dict):
     Put the model in eval mode and disable gradients. Return something callable
     that maps one preprocessed image to one float.
     """
-    raise NotImplementedError("TODO: build the model and load the checkpoint")
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    saved = ckpt["config"]
+    for section, field in (("model", "hidden"), ("model", "dropout"), ("data", "pixel_size")):
+        if cfg[section][field] != saved[section][field]:
+            raise SystemExit(f"--config {section}.{field} = {cfg[section][field]!r}, "
+                             f"but the checkpoint was trained with {saved[section][field]!r}")
+    net = MLP(in_dim=ckpt["in_dim"], hidden=list(saved["model"]["hidden"]), dropout=saved["model"]["dropout"])
+    net.load_state_dict(ckpt["state_dict"])
+    net.eval().requires_grad_(False)
+    return Predictor(net, ckpt["scaler_mean"], ckpt["scaler_scale"])
 
 
 def preprocess(image_path: Path, cfg: dict):
@@ -64,12 +90,12 @@ def preprocess(image_path: Path, cfg: dict):
     between training and prediction is the single most common reason a good
     validation score turns into a bad leaderboard score.
     """
-    raise NotImplementedError("TODO: load and preprocess a single image")
+    return pixels_of_image(image_path, cfg["data"]["pixel_size"])
 
 
 def predict_one(model, image_path: Path, cfg: dict) -> float:
     """One image in, one number out."""
-    raise NotImplementedError("TODO: run the model, return a float in [0, 1]")
+    return min(max(model(preprocess(image_path, cfg)), 0.0), 1.0)
 
 
 def main() -> None:
